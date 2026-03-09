@@ -31,7 +31,7 @@ from dataclasses import dataclass
 import PIL.Image
 
 from diffusers.utils import BaseOutput
-from transformer import QwenImageTransformer2DModel
+from models.transformer import QwenImageTransformer2DModel
 
 @dataclass
 class QwenImagePipelineOutput(BaseOutput):
@@ -491,6 +491,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        cfg_steps: Optional[int] = None,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -654,7 +655,6 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         img_shapes = [[(1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2)]] * batch_size
 
         # 5. Prepare timesteps
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
         image_seq_len = latents.shape[1]
         mu = calculate_shift(
             image_seq_len,
@@ -663,13 +663,25 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             self.scheduler.config.get("base_shift", 0.5),
             self.scheduler.config.get("max_shift", 1.15),
         )
-        timesteps, num_inference_steps = retrieve_timesteps(
-            self.scheduler,
-            num_inference_steps,
-            device,
-            sigmas=sigmas,
-            mu=mu,
-        )
+        # Check if scheduler accepts custom sigmas (Euler/AB2 do, DPM-Solver does not)
+        _set_ts_params = set(inspect.signature(self.scheduler.set_timesteps).parameters.keys())
+        accept_sigmas = "sigmas" in _set_ts_params
+        if accept_sigmas:
+            sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
+            timesteps, num_inference_steps = retrieve_timesteps(
+                self.scheduler,
+                num_inference_steps,
+                device,
+                sigmas=sigmas,
+                mu=mu,
+            )
+        else:
+            # Scheduler computes its own sigma schedule (e.g. DPM-Solver++)
+            timesteps, num_inference_steps = retrieve_timesteps(
+                self.scheduler,
+                num_inference_steps,
+                device,
+            )
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
@@ -732,7 +744,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 self._current_timestep = t
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
-                
+
                 if do_true_cfg:
                     # Batch CFG - run conditional and unconditional in single forward pass
                     batched_latents = torch.cat([latents, latents], dim=0)

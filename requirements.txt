@@ -1,0 +1,7 @@
+transformers 
+diffusers 
+quack-kernels
+accelerate 
+einops 
+hf-transfer
+
